@@ -8,6 +8,7 @@ import pin_handler
 import cars
 from google_oauth import build_auth_url
 from states import OnboardingStates
+from config import GUIDE_URL
 from keyboards import (
     currency_keyboard,
     skip_keyboard,
@@ -15,6 +16,7 @@ from keyboards import (
     google_connect_keyboard,
     add_car_or_skip_keyboard,
     add_another_car_keyboard,
+    guide_keyboard,
 )
 
 router = Router()
@@ -24,13 +26,17 @@ HELP_TEXT = (
     "Просто пиши траты и доходы текстом, голосом или фото чека — я сам разберу.\n"
     "Пример: <i>«кофе 150р»</i>, <i>«зарплата 100000р»</i>.\n"
     "⚠️ Валюту указывать обязательно — иначе не смогу отличить сумму от количества.\n\n"
+    "📖 Полная инструкция: /guide\n\n"
     "Команды:\n"
     "/report — сводка за период\n"
     "/history — последние траты\n"
     "/categories — свои категории\n"
     "/family — семейный бюджет\n"
     "/undo — отменить последнюю запись\n"
-    "/settings — валюта, период, PIN"
+    "/settings — валюта, период, PIN\n"
+    "/cars — машины\n"
+    "/carstats — статистика по машине\n"
+    "/guide — подробная инструкция"
 )
 
 
@@ -45,8 +51,18 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.set_state(OnboardingStates.waiting_currency)
     await message.answer(
         "Привет! Я помогу вести учёт доходов и расходов. 🏠\n\n"
+        "Если что — подробная инструкция всегда доступна по /guide.\n\n"
         "Для начала — в какой валюте будем считать?",
         reply_markup=currency_keyboard(),
+    )
+
+
+@router.message(Command("guide"))
+async def cmd_guide(message: Message):
+    await message.answer(
+        "📖 Инструкция: онбординг, все команды, семейный бюджет, машины и "
+        "нюансы, которые легко не заметить.",
+        reply_markup=guide_keyboard(GUIDE_URL),
     )
 
 
@@ -103,7 +119,7 @@ async def enter_cash(message: Message, state: FSMContext):
 async def ask_google_connect(message: Message, state: FSMContext):
     user = db.get_or_create_user(message.chat.id, message.chat.username)
     await state.set_state(OnboardingStates.waiting_google_connect)
-    auth_url = build_auth_url(user_id=user["id"], tg_id=message.chat.id)
+    auth_url = await build_auth_url(user_id=user["id"], tg_id=message.chat.id)
     await message.answer(
         "Теперь подключи свой Google Drive — туда будут сохраняться все "
         "траты и доходы (не в базу разработчика, а прямо на твой личный "

@@ -4,7 +4,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 def currency_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for code in ("RUB", "USD", "EUR"):
+    for code in ("BYN", "RUB", "USD"):
         builder.button(text=code, callback_data=f"currency:{code}")
     builder.adjust(3)
     return builder.as_markup()
@@ -61,6 +61,12 @@ def settings_menu_keyboard(has_pin: bool) -> InlineKeyboardMarkup:
 def google_connect_keyboard(url: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔗 Подключить Google Drive", url=url)
+    return builder.as_markup()
+
+
+def guide_keyboard(url: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📖 Открыть инструкцию", url=url)
     return builder.as_markup()
 
 

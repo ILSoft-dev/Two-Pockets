@@ -35,6 +35,10 @@ CRON_SECRET = os.getenv("CRON_SECRET")
 # без обращений к API). Дефолт — раз в 6 часов, большой запас на всякий случай.
 SUPABASE_KEEPALIVE_INTERVAL_SECONDS = int(os.getenv("SUPABASE_KEEPALIVE_INTERVAL_SECONDS", str(6 * 60 * 60)))
 
+# Ссылка на инструкцию (Telegraph). Можно поменять через переменную
+# окружения без передеплоя кода, если гайд будет переопубликован по новому URL.
+GUIDE_URL = os.getenv("GUIDE_URL", "https://telegra.ph/Instrukciya-k-Two-Pockets-bot-08-11")
+
 # Дефолтные категории, создаются каждому юзеру при онбординге
 DEFAULT_CATEGORIES = [
     "Продукты",
@@ -55,6 +59,7 @@ INCOME_KEYWORDS = [
 
 # Символы валют, которые парсер распознаёт как признак суммы
 CURRENCY_SYMBOLS = {
+    "byn": "BYN", "br": "BYN",
     "р": "RUB", "руб": "RUB", "₽": "RUB",
     "$": "USD", "usd": "USD",
     "€": "EUR", "eur": "EUR",

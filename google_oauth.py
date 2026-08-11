@@ -1,6 +1,16 @@
 """
 google_oauth.py
-v1.0 - per-user Google OAuth (authorization-code flow, plain REST via aiohttp)
+v1.1 - per-user Google OAuth (authorization-code flow, plain REST via aiohttp)
+
+Changelog:
+- v1.1: pending OAuth state moved from an in-memory dict to Redis (with a
+        10-minute TTL). A plain dict didn't survive a Render redeploy/restart
+        between "clicked Подключить Google Drive" and "came back from the
+        Google consent screen" — the exact window a redeploy is likely to
+        land in while actively debugging deployment settings — which is
+        exactly what produced "Unknown or expired state" in practice, not
+        an actually-expired flow. Redis already backs FSM storage, so this
+        reuses the same instance rather than adding new infrastructure.
 
 Same OAuth Client ID/Secret as PixKeep (same Google Cloud project) — this is
 a different *application* using the same client, not a shared installation.
@@ -8,29 +18,40 @@ Each TwoPockets user authorizes their own Google Drive on Google's own
 consent page; the bot only ever receives an authorization code -> tokens,
 never a password.
 
-Note the state map here carries BOTH the internal Supabase user_id (needed
-to write tokens to the users table) and the Telegram tg_id (needed to send
-a confirmation message back — main.py's bot instance isn't a module global,
+Note the state carries BOTH the internal Supabase user_id (needed to write
+tokens to the users table) and the Telegram tg_id (needed to send a
+confirmation message back — main.py's bot instance isn't a module global,
 so the web callback route reaches it via request.app["bot"]).
 """
+import json
 import secrets
 from urllib.parse import urlencode
 
 import aiohttp
+import redis.asyncio as redis_asyncio
 
-from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI, GOOGLE_SCOPE
+from config import (
+    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI,
+    GOOGLE_SCOPE, REDIS_URL,
+)
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
-# short-lived map: state nonce -> {user_id, tg_id} (survives only until callback)
-pending_states: dict[str, dict] = {}
+STATE_TTL_SECONDS = 600  # 10 минут — щедрый запас на то, чтобы пройти форму Google
+_STATE_KEY_PREFIX = "oauth_state:"
+
+_redis = redis_asyncio.from_url(REDIS_URL)
 
 
-def build_auth_url(user_id: int, tg_id: int) -> str:
+async def build_auth_url(user_id: int, tg_id: int) -> str:
     state = secrets.token_urlsafe(24)
-    pending_states[state] = {"user_id": user_id, "tg_id": tg_id}
+    await _redis.set(
+        f"{_STATE_KEY_PREFIX}{state}",
+        json.dumps({"user_id": user_id, "tg_id": tg_id}),
+        ex=STATE_TTL_SECONDS,
+    )
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
@@ -45,10 +66,13 @@ def build_auth_url(user_id: int, tg_id: int) -> str:
 
 async def exchange_code(state: str, code: str) -> tuple[dict, str, str]:
     """Return ({user_id, tg_id}, access_token, refresh_token) for a completed
-    consent, or raise ValueError if the state is unknown/expired."""
-    pending = pending_states.pop(state, None)
-    if pending is None:
+    consent, or raise ValueError if the state is unknown/expired/already used."""
+    key = f"{_STATE_KEY_PREFIX}{state}"
+    raw = await _redis.get(key)
+    if raw is None:
         raise ValueError("Unknown or expired state")
+    await _redis.delete(key)  # одноразовое использование — как и раньше с dict.pop
+    pending = json.loads(raw)
 
     data = {
         "grant_type": "authorization_code",

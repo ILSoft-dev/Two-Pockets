@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.types import BotCommand
 from aiohttp import web
 
 from config import BOT_TOKEN, REDIS_URL, PORT, CRON_SECRET, SUPABASE_KEEPALIVE_INTERVAL_SECONDS
@@ -31,6 +32,19 @@ import input_handler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+BOT_COMMANDS = [
+    BotCommand(command="start", description="Онбординг / статус"),
+    BotCommand(command="guide", description="Подробная инструкция"),
+    BotCommand(command="report", description="Сводка за период"),
+    BotCommand(command="history", description="История операций"),
+    BotCommand(command="undo", description="Отменить свою последнюю запись"),
+    BotCommand(command="categories", description="Список категорий, добавить свою"),
+    BotCommand(command="family", description="Семейный бюджет"),
+    BotCommand(command="cars", description="Машины: список, добавить, удалить"),
+    BotCommand(command="carstats", description="Статистика по машине"),
+    BotCommand(command="settings", description="Валюта, период, PIN"),
+]
 
 
 async def health_check(request):
@@ -115,6 +129,7 @@ async def main():
 
     await run_health_server(bot, storage)  # для UptimeRobot + OAuth-callback на Render
     asyncio.create_task(supabase_keepalive_loop())
+    await bot.set_my_commands(BOT_COMMANDS)
     await bot.delete_webhook(drop_pending_updates=True)
     await run_polling_with_retry(dp, bot)
 

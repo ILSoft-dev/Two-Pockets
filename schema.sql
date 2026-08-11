@@ -73,11 +73,12 @@ create table if not exists category_map (
     primary key (user_id, keyword)
 );
 
--- ⚠️ ПЕРЕЕЗЖАЕТ: сами транзакции (суммы/категории/даты) уезжают в Google
--- Sheets владельца (лист "Транзакции" — см. sheets_client.py). Эта таблица
--- временно остаётся, пока не переписан input_handler.py/report.py/history.py
--- (следующий шаг плана) — не удалять раньше времени, иначе текущий код
--- перестанет работать вообще.
+-- ⚠️ УСТАРЕЛО: сами транзакции переехали в Google Sheets владельца (лист
+-- "Транзакции" — см. sheets_transactions.py). Текущий код (input_handler.py,
+-- report.py, history.py, undo.py) больше вообще не читает и не пишет в эту
+-- таблицу. Создавать её НЕ обязательно для новой установки — оставлена
+-- здесь только для тех, у кого уже есть старые данные в ней и кто хочет
+-- решить, переносить ли их вручную, перед тем как выполнить DROP TABLE.
 create table if not exists transactions (
     id bigserial primary key,
     user_id bigint references users(id) on delete cascade,

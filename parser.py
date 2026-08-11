@@ -12,7 +12,7 @@ from config import INCOME_KEYWORDS, CURRENCY_SYMBOLS
 # перед или после символа валюты. Примеры, которые должны сработать:
 # "150р", "150 р", "150₽", "$150", "100000руб", "12.5$"
 AMOUNT_PATTERN = re.compile(
-    r"(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<currency>руб\.?|р\.?|₽|usd|\$|eur|€)"
+    r"(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<currency>руб\.?|р\.?|₽|usd|\$|eur|€|byn|br)"
     r"|(?P<currency2>\$|€)\s*(?P<amount2>\d+(?:[.,]\d+)?)",
     re.IGNORECASE,
 )
