@@ -138,6 +138,9 @@ def parse_question(text: str, categories: list[str], car_names: list[str]) -> di
     if not isinstance(parsed, dict) or "intent" not in parsed:
         return None
     return parsed
+
+
+def extract_receipt_total(image_bytes: bytes) -> float | None:
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     prompt = (
         "На фото чек из магазина или кафе. Найди итоговую сумму покупки "

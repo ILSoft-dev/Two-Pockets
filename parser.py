@@ -1,5 +1,6 @@
 """
-Парсинг текстового ввода вида "кофе 150р", "зарплата 100000₽".
+Парсинг текстового ввода вида "кофе 150р", "зарплата 100000₽",
+"2 мороженых по 4 рубля" (количество × цена, только с явным маркером "по").
 
 Обязательное условие (см. README): пользователь ВСЕГДА указывает валюту
 рядом с числом, иначе бот не может отличить сумму от количества/массы
@@ -17,12 +18,42 @@ AMOUNT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Количество × цена — срабатывает ТОЛЬКО с явным маркером "по" между
+# количеством и ценой ("2 мороженых по 4 рубля"). Без "по" — никакого
+# умножения, число из AMOUNT_PATTERN просто берётся как итог (безопасный
+# фоллбэк вместо угадывания, если количество не обозначено явно).
+# "item" — название товара между qty и "по" (нежадно, максимум 30 символов,
+# чтобы не захватить случайно что-то далёкое по тексту) — ВАЖНО вернуть его
+# в remainder отдельно, иначе категоризатору не на чём будет угадывать.
+QUANTITY_PATTERN = re.compile(
+    r"(?P<qty>\d+)\s*(?:шт\.?|штук\w*)?\s*"
+    r"(?P<item>.{0,30}?)"
+    r"\bпо\s+"
+    r"(?P<unit_price>\d+(?:[.,]\d+)?)\s*"
+    r"(?P<currency>руб\.?|р\.?|₽|usd|\$|eur|€|byn|br)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def parse_amount(text: str):
     """
     Возвращает (amount: float, currency_code: str, remainder_text: str) или None,
     если валюта не указана явно (по требованию — без валюты не парсим).
     """
+    qty_match = QUANTITY_PATTERN.search(text)
+    if qty_match:
+        qty = int(qty_match.group("qty"))
+        unit_price = float(qty_match.group("unit_price").replace(",", "."))
+        raw_currency = qty_match.group("currency").lower().replace(".", "")
+        amount = qty * unit_price
+        currency_code = CURRENCY_SYMBOLS.get(raw_currency, "RUB")
+        item_text = qty_match.group("item").strip()
+        remainder = (
+            text[: qty_match.start()] + " " + item_text + " " + text[qty_match.end():]
+        ).strip()
+        remainder = re.sub(r"\s+", " ", remainder).strip()
+        return amount, currency_code, remainder
+
     match = AMOUNT_PATTERN.search(text)
     if not match:
         return None
