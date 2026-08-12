@@ -112,11 +112,24 @@ async def _answer_question_inner(user_id: int, text: str) -> str:
     if intent == "mileage":
         return await _answer_mileage(account, parsed.get("car_name"), since, until, label)
 
-    return await _answer_money(user_id, intent, parsed.get("category"), since, until, label,
-                               user.get("currency", "RUB"))
+    return await _answer_money(user_id, intent, parsed.get("category"), parsed.get("item"),
+                               since, until, label, user.get("currency", "RUB"))
 
 
-async def _answer_money(user_id: int, intent: str, category: str | None,
+def _item_matches(item: str, text: str) -> bool:
+    """Подстрочное совпадение с запасом на падежные окончания ("мороженое"
+    в вопросе должно найти "мороженых" в описании траты) — берём основу
+    слова (~70% длины, минимум 3 символа), а не всё слово целиком. Та же
+    идея, что уже применяли для распознавания жидкостей в fluid_tracker.py."""
+    item_lower = item.lower().strip()
+    text_lower = text.lower()
+    if item_lower in text_lower:
+        return True
+    stem_len = max(3, int(len(item_lower) * 0.7))
+    return item_lower[:stem_len] in text_lower
+
+
+async def _answer_money(user_id: int, intent: str, category: str | None, item: str | None,
                         since, until, label: str, currency: str) -> str:
     try:
         rows = await get_transactions_in_range(user_id, since, until)
@@ -127,12 +140,23 @@ async def _answer_money(user_id: int, intent: str, category: str | None,
 
     tx_type = "income" if intent == "income" else "expense"
     filtered = [r for r in rows if r["Тип"] == tx_type]
-    if category:
+
+    # "item" (конкретный товар) приоритетнее "category" — если товар назван,
+    # ищем именно его в описании траты, а не суммируем всю угаданную
+    # категорию целиком (иначе "сколько на мороженое" отвечало бы суммой
+    # по всей категории "Продукты", как это было до фикса).
+    if item:
+        filtered = [r for r in filtered if _item_matches(item, str(r.get("Комментарий", "")))]
+        subject = f" на «{item}»"
+    elif category:
         filtered = [r for r in filtered if r["Категория"] == category]
+        subject = f" на «{category}»"
+    else:
+        subject = ""
 
     total = sum(to_float(r["Сумма"]) for r in filtered)
     verb = "доход" if intent == "income" else "расход"
-    cat_part = f" на «{category}»" if category else ""
+    cat_part = subject
 
     if not filtered:
         return f"За {label}{cat_part} {verb}ов не нашёл."
