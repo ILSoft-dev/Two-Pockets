@@ -4,8 +4,21 @@
   парсер по ключевым словам и category_map не справились)
 - transcribe_voice  — Whisper large-v3, голос -> текст
 - extract_receipt_total — Vision (qwen3.6-27b), фото чека -> сумма
+
+Changelog:
+- v1.1: TEXT_MODEL переключён на gpt-oss-20b (быстрее/дешевле, чем 120b,
+        достаточно для тривиальной классификации в одно слово) +
+        reasoning_effort="low" — gpt-oss — reasoning-модель, часть токенов
+        по умолчанию уходит на внутреннее рассуждение ДО финального ответа,
+        а старый max_tokens=20 (нормальный для прежней не-reasoning модели)
+        мог обрезать ответ до того, как модель успевала написать саму
+        категорию. Добавлено логирование сырого ответа для диагностики.
+        requirements.txt: groq bumped 0.13.0 -> 1.6.0 — старая версия SDK
+        вообще не знает про reasoning_effort (строго типизированный create(),
+        без **kwargs) и упала бы с TypeError.
 """
 import base64
+import logging
 import re
 from groq import Groq
 
@@ -14,9 +27,10 @@ from config import GROQ_API_KEY
 client = Groq(api_key=GROQ_API_KEY)
 
 # llama-4-scout-17b-16e-instruct отключена Groq 17 июня 2026 (см.
-# console.groq.com/docs/deprecations) — рекомендованные замены: gpt-oss-120b
-# для чистого текста, qwen3.6-27b для мультимодальных (vision) задач.
-TEXT_MODEL = "openai/gpt-oss-120b"
+# console.groq.com/docs/deprecations). ВАЖНО: llama-3.3-70b-versatile тоже
+# в процессе отключения — не откатываться туда. Рекомендованное направление
+# Groq — gpt-oss (text) / qwen3.6-27b (vision).
+TEXT_MODEL = "openai/gpt-oss-20b"
 VISION_MODEL = "qwen/qwen3.6-27b"
 WHISPER_MODEL = "whisper-large-v3"
 
@@ -31,9 +45,12 @@ def categorize_text(remainder_text: str, categories: list[str]) -> str:
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=20,
+        max_tokens=200,          # запас для reasoning-модели (gpt-oss)
+        reasoning_effort="low",  # не нужны развёрнутые рассуждения на классификацию в одно слово
     )
-    answer = completion.choices[0].message.content.strip()
+    answer = (completion.choices[0].message.content or "").strip()
+    logging.info(f"categorize_text: remainder={remainder_text!r} raw_answer={answer!r}")
+
     # Подстраховка: если модель вернула что-то не из списка — берём "Разное"
     for cat in categories:
         if cat.lower() in answer.lower():
@@ -73,9 +90,11 @@ def extract_receipt_total(image_bytes: bytes) -> float | None:
             }
         ],
         temperature=0,
-        max_tokens=30,
+        max_tokens=60,
     )
-    answer = completion.choices[0].message.content.strip()
+    answer = (completion.choices[0].message.content or "").strip()
+    logging.info(f"extract_receipt_total: raw_answer={answer!r}")
+
     match = re.search(r"(\d+(?:[.,]\d+)?)", answer)
     if not match or "НЕТ" in answer.upper():
         return None
