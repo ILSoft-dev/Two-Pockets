@@ -100,6 +100,14 @@ async def save_mileage_point(user_id: int, who: str, car_name: str, mileage: flo
 
 
 # --------------------------------------------------------------- reading ----
+def _parse_dt(value) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 async def get_transactions_since(user_id: int, since: datetime) -> list[dict]:
     account = _get_account(user_id)
     box = google_api.TokenBox(account)
@@ -110,13 +118,13 @@ async def get_transactions_since(user_id: int, since: datetime) -> list[dict]:
             )
         rows = await google_api.call(box, _do)
 
+    since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
     result = []
     for r in rows:
         if r["Статус"] != STATUS_ACTIVE:
             continue
-        try:
-            dt = datetime.fromisoformat(str(r["Дата и время"]))
-        except ValueError:
+        dt = _parse_dt(r["Дата и время"])
+        if dt is None:
             continue
         if dt >= since:
             result.append(r)
@@ -141,6 +149,42 @@ async def get_report(user_id: int, since: datetime) -> dict:
 async def get_history(user_id: int, days: int) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     return await get_transactions_since(user_id, since)
+
+
+async def get_transactions_in_range(user_id: int, since: datetime | None,
+                                    until: datetime | None) -> list[dict]:
+    """Как get_transactions_since, но с обеими границами — нужно для
+    вопросов про конкретный прошлый месяц ("сколько потратил в июне"), где
+    важно НЕ захватить данные после конца месяца. since/until=None —
+    открытая граница с этой стороны."""
+    account = _get_account(user_id)
+    box = google_api.TokenBox(account)
+    async with aiohttp.ClientSession() as session:
+        async def _do(token):
+            return await sc.get_rows(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_TRANSACTIONS,
+            )
+        rows = await google_api.call(box, _do)
+
+    if since is not None:
+        since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+    if until is not None:
+        until = until if until.tzinfo else until.replace(tzinfo=timezone.utc)
+
+    result = []
+    for r in rows:
+        if r["Статус"] != STATUS_ACTIVE:
+            continue
+        dt = _parse_dt(r["Дата и время"])
+        if dt is None:
+            continue
+        if since is not None and dt < since:
+            continue
+        if until is not None and dt > until:
+            continue
+        result.append(r)
+    result.sort(key=lambda r: r["Дата и время"], reverse=True)
+    return result
 
 
 # --------------------------------------------------------------- /undo -------

@@ -70,6 +70,54 @@ def match_car_name(text: str, active_cars: list[dict]) -> str | None:
     return None
 
 
+async def get_mileage_distance(account: dict, car_name: str,
+                               since, until) -> float | None:
+    """Пройденное расстояние в диапазоне [since, until] (любая из границ
+    может быть None — открытая). Берёт последнюю точку ДО since как базу
+    (если её нет — первую точку внутри диапазона), последнюю точку внутри
+    диапазона — как конец. None, если внутри диапазона вообще нет точек."""
+    from datetime import timezone as _tz
+
+    box = google_api.TokenBox(account)
+    async with aiohttp.ClientSession() as session:
+        async def _do(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_MILEAGE)
+        rows = await google_api.call(box, _do)
+
+    def _parse(value):
+        from datetime import datetime
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+
+    since_aware = since if (since is None or since.tzinfo) else since.replace(tzinfo=_tz.utc)
+    until_aware = until if (until is None or until.tzinfo) else until.replace(tzinfo=_tz.utc)
+
+    points = []
+    for r in rows:
+        if r["Машина"] != car_name:
+            continue
+        dt = _parse(r["Дата"])
+        if dt is None:
+            continue
+        points.append((dt, sc.to_float(r["Пробег"])))
+    if not points:
+        return None
+    points.sort(key=lambda p: p[0])
+
+    in_range = [p for p in points if (since_aware is None or p[0] >= since_aware)
+               and (until_aware is None or p[0] <= until_aware)]
+    if not in_range:
+        return None
+
+    before = [p for p in points if since_aware is not None and p[0] < since_aware]
+    baseline = before[-1][1] if before else in_range[0][1]
+    latest = in_range[-1][1]
+    return latest - baseline
+
+
 async def get_latest_mileage(account: dict, car_name: str) -> float | None:
     """Most recent mileage point for a car — used both for the reminder's
     'Без изменений' button (re-log the same value with today's date) and,

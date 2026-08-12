@@ -38,6 +38,7 @@ class SettingsStates(StatesGroup):
 
 class AmbiguousCategoryStates(StatesGroup):
     waiting_choice = State()
+    waiting_new_category_name = State()
 
 
 class CarResolutionStates(StatesGroup):

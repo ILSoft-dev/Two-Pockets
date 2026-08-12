@@ -18,6 +18,7 @@ Changelog:
         без **kwargs) и упала бы с TypeError.
 """
 import base64
+import json
 import logging
 import re
 from groq import Groq
@@ -67,7 +68,76 @@ def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> str:
     return transcription.text.strip()
 
 
-def extract_receipt_total(image_bytes: bytes) -> float | None:
+def parse_question(text: str, categories: list[str], car_names: list[str]) -> dict | None:
+    """Разбирает вопрос типа 'сколько я потратил на корм в июне?' в структуру:
+    {"intent": "spending"|"income"|"mileage"|"unknown",
+     "category": <строка из categories или null>,
+     "car_name": <строка из car_names или null>,
+     "period_type": "specific_month"|"current_period"|"all_time",
+     "month": <1-12 или null>, "year": <год или null>}
+
+    НЕ используем response_format ни в каком виде — у gpt-oss на Groq была
+    подтверждённая проблема с игнорированием json_schema (модель тихо
+    возвращает свободный текст), и надёжность даже json_object под вопросом.
+    Вместо этого — явная схема прямо в промпте + защитный разбор ответа.
+    Возвращает None при любом сбое (сеть, парсинг) — вызывающий код должен
+    вежливо ответить "не понял вопрос", а не падать.
+    """
+    schema_hint = (
+        '{"intent": "spending" | "income" | "mileage" | "unknown", '
+        '"category": "<строка из известных категорий или null>", '
+        '"car_name": "<строка из известных машин или null>", '
+        '"period_type": "specific_month" | "current_period" | "all_time", '
+        '"month": <число 1-12 или null>, "year": <число или null>}'
+    )
+    known = (
+        f"Известные категории: {', '.join(categories) if categories else 'нет'}.\n"
+        f"Известные машины: {', '.join(car_names) if car_names else 'нет'}."
+    )
+    prompt = (
+        f"Вопрос пользователя: \"{text}\"\n{known}\n\n"
+        f"Разбери вопрос строго в JSON по этой схеме, без пояснений и markdown:\n{schema_hint}\n\n"
+        "Правила:\n"
+        "- intent=mileage только если явно спрашивают про пробег/километраж.\n"
+        "- intent=spending для трат/расходов, intent=income для доходов/зарплаты.\n"
+        "- category и car_name — ТОЛЬКО точное совпадение из списков выше, иначе null.\n"
+        "- period_type=specific_month, если назван конкретный месяц (год может быть не назван).\n"
+        "- period_type=current_period, если период не назван вообще (спрашивают "
+        "\"сколько я потратил\" без уточнения когда).\n"
+        "- period_type=all_time, если явно просят за всё время/всего/с начала.\n"
+        "- month — номер месяца 1-12, если назван (иначе null). year — если назван явно (иначе null)."
+    )
+    try:
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=300,
+            reasoning_effort="low",
+        )
+        answer = (completion.choices[0].message.content or "").strip()
+    except Exception:
+        logging.exception("parse_question: Groq request failed")
+        return None
+
+    logging.info(f"parse_question: text={text!r} raw_answer={answer!r}")
+
+    # Защитный разбор: снимаем возможные markdown-обёртки ```json ... ```,
+    # берём первый {...} блок, а не доверяем, что весь ответ — чистый JSON.
+    cleaned = answer.replace("```json", "").replace("```", "").strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        logging.warning(f"parse_question: no JSON object found in answer: {answer!r}")
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        logging.warning(f"parse_question: failed to decode JSON: {match.group(0)!r}")
+        return None
+
+    if not isinstance(parsed, dict) or "intent" not in parsed:
+        return None
+    return parsed
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     prompt = (
         "На фото чек из магазина или кафе. Найди итоговую сумму покупки "

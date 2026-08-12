@@ -25,6 +25,7 @@ import groq_client
 import cars
 import auto_expense
 import fluid_tracker
+import insights
 from parser import parse_amount, guess_type
 from keyboards import category_choice_keyboard, car_choice_keyboard
 from states import AmbiguousCategoryStates, CarResolutionStates
@@ -51,6 +52,20 @@ async def react_ok(message: Message):
     except Exception:
         # Реакции могут быть недоступны в некоторых чатах — не критично
         await message.answer("✅ Записано")
+
+
+QUESTION_WORDS = ["сколько", "скольк", "какой", "какая", "какие", "какое", "когда", "где", "почему"]
+
+
+def looks_like_question(text: str) -> bool:
+    """Дешёвая эвристика ДО обращения к LLM — вопросительный знак или явные
+    вопросительные слова. Не идеально (не ловит вообще все формулировки),
+    но и не должно: если промахнётся — сообщение просто попадёт в обычную
+    "не вижу валюту" ветку, не страшно."""
+    if "?" in text:
+        return True
+    lowered = f" {text.lower()} "
+    return any(w in lowered for w in QUESTION_WORDS)
 
 
 def first_keyword(remainder: str) -> str:
@@ -377,6 +392,53 @@ async def ask_category_choice(
     )
 
 
+@router.callback_query(AmbiguousCategoryStates.waiting_choice, F.data == "cat_choice_new")
+async def category_choice_new(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AmbiguousCategoryStates.waiting_new_category_name)
+    await callback.message.answer("Введи название новой категории:")
+    await callback.answer()
+
+
+@router.message(AmbiguousCategoryStates.waiting_new_category_name)
+async def new_category_named(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if not name:
+        await message.answer("Напиши название категории текстом.")
+        return
+
+    data = await state.get_data()
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username)
+    who = who_label(message.from_user)
+    remainder = data.get("remainder", "")
+
+    existing_names = [c["name"] for c in db.get_categories(user["id"])]
+    if name not in existing_names:
+        try:
+            db.add_category(user["id"], name)
+        except Exception:
+            logging.exception("new_category_named: unexpected error adding category")
+            await message.answer(
+                "Не получилось создать категорию — попробуй другое название "
+                "или выбери из уже существующих через /categories."
+            )
+            return
+
+    if name == AUTO_CATEGORY:
+        await route_auto_expense(
+            message, state, user["id"], who,
+            data["amount"], data["tx_type"], data["source"], remainder,
+        )
+        return
+
+    await save_and_confirm(message, user["id"], who, data["amount"], data["tx_type"],
+                           name, data["source"], comment=remainder)
+    keyword = first_keyword(remainder)
+    if keyword:
+        db.remember_keyword_category(user["id"], keyword, name)
+
+    await state.clear()
+
+
 @router.callback_query(AmbiguousCategoryStates.waiting_choice, F.data.startswith("cat_choice:"))
 async def category_chosen(callback: CallbackQuery, state: FSMContext):
     category = callback.data.split(":", 1)[1]
@@ -416,6 +478,13 @@ async def process_text_input(message: Message, state: FSMContext, text: str, sou
     parsed = parse_amount(text)
 
     if parsed is None:
+        # ВАЖЕН ПОРЯДОК: сначала проверяем "это вопрос?" — иначе "какой
+        # пробег у матиза?" попал бы в ветку обновления пробега ниже (там
+        # тоже есть слово "пробег", но это вопрос, а не новое показание).
+        if looks_like_question(text):
+            answer = await insights.answer_question(user["id"], text)
+            await message.answer(answer)
+            return
         # Отдельная ветка: "пробег опель 305000 км" — валюты в таком
         # сообщении нет и не будет, это не трата, а обновление пробега.
         if re.search(r"(?i)пробег", text):

@@ -28,6 +28,7 @@ def category_choice_keyboard(categories: list[str]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for cat in categories:
         builder.button(text=cat, callback_data=f"cat_choice:{cat}")
+    builder.button(text="➕ Добавить категорию", callback_data="cat_choice_new")
     builder.adjust(2)
     return builder.as_markup()
 
