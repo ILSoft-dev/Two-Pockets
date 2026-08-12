@@ -1,6 +1,11 @@
 """
 sheets_transactions.py
-v1.0 - transactions CRUD backed by Google Sheets (replaces Supabase transactions table)
+v1.1 - transactions CRUD backed by Google Sheets (replaces Supabase transactions table)
+
+Changelog:
+- v1.1: every Sheets API call now goes through google_api.call() (refresh
+        access token on 401, retry once) — see google_api.py's docstring
+        for why this was missing and what it broke.
 
 All money data now lives in the *effective* Google account's spreadsheet
 (supabase_client.get_effective_google_account — own account, or the family
@@ -13,6 +18,7 @@ import aiohttp
 
 import supabase_client as db
 import sheets_client as sc
+import google_api
 from sheets_client import to_float  # re-exported: history.py/undo.py use tx.to_float
 
 STATUS_ACTIVE = "Активна"
@@ -35,12 +41,14 @@ def _get_account(user_id: int) -> dict:
 async def save_transaction(user_id: int, who: str, amount: float, tx_type: str,
                            category: str, source: str, comment: str = "") -> str:
     account = _get_account(user_id)
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        return await sc.append_row(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_TRANSACTIONS,
-            [sc.now_iso(), who, tx_type, category, amount, source, comment, STATUS_ACTIVE],
-        )
+        async def _do(token):
+            return await sc.append_row(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_TRANSACTIONS,
+                [sc.now_iso(), who, tx_type, category, amount, source, comment, STATUS_ACTIVE],
+            )
+        return await google_api.call(box, _do)
 
 
 async def save_auto_expense(user_id: int, who: str, amount: float, tx_type: str,
@@ -51,45 +59,57 @@ async def save_auto_expense(user_id: int, who: str, amount: float, tx_type: str,
     mileage point if one was mentioned in the message. Returns
     (transactions_row_id, auto_row_id)."""
     account = _get_account(user_id)
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        tx_id = await sc.append_row(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_TRANSACTIONS,
-            [sc.now_iso(), who, tx_type, "Авто", amount, source, description, STATUS_ACTIVE],
-        )
-        auto_id = await sc.append_row(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_AUTO,
-            [sc.now_iso(), car_name, auto_type, description, amount, mileage or "", who, STATUS_ACTIVE],
-        )
-        if mileage is not None:
-            await sc.append_row(
-                session, account["google_access_token"], account["google_spreadsheet_id"],
-                sc.SHEET_MILEAGE,
-                [sc.now_iso(), car_name, mileage, "Из авто-траты", who],
+        async def _do_tx(token):
+            return await sc.append_row(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_TRANSACTIONS,
+                [sc.now_iso(), who, tx_type, "Авто", amount, source, description, STATUS_ACTIVE],
             )
+        tx_id = await google_api.call(box, _do_tx)
+
+        async def _do_auto(token):
+            return await sc.append_row(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_AUTO,
+                [sc.now_iso(), car_name, auto_type, description, amount, mileage or "", who, STATUS_ACTIVE],
+            )
+        auto_id = await google_api.call(box, _do_auto)
+
+        if mileage is not None:
+            async def _do_mileage(token):
+                return await sc.append_row(
+                    session, token, account["google_spreadsheet_id"], sc.SHEET_MILEAGE,
+                    [sc.now_iso(), car_name, mileage, "Из авто-траты", who],
+                )
+            await google_api.call(box, _do_mileage)
+
     return tx_id, auto_id
 
 
 async def save_mileage_point(user_id: int, who: str, car_name: str, mileage: float,
                              source: str = "Ручной ввод") -> str:
     account = _get_account(user_id)
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        return await sc.append_row(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_MILEAGE,
-            [sc.now_iso(), car_name, mileage, source, who],
-        )
+        async def _do(token):
+            return await sc.append_row(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_MILEAGE,
+                [sc.now_iso(), car_name, mileage, source, who],
+            )
+        return await google_api.call(box, _do)
 
 
 # --------------------------------------------------------------- reading ----
 async def get_transactions_since(user_id: int, since: datetime) -> list[dict]:
     account = _get_account(user_id)
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        rows = await sc.get_rows(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_TRANSACTIONS,
-        )
+        async def _do(token):
+            return await sc.get_rows(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_TRANSACTIONS,
+            )
+        rows = await google_api.call(box, _do)
+
     result = []
     for r in rows:
         if r["Статус"] != STATUS_ACTIVE:
@@ -129,18 +149,25 @@ async def soft_delete_last(user_id: int, who: str) -> dict | None:
     just anyone in a shared family sheet) and marks it Удалена. Returns the
     deleted row for the confirmation message, or None if nothing to undo."""
     account = _get_account(user_id)
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        rows = await sc.get_rows(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_TRANSACTIONS,
-        )
+        async def _do_get(token):
+            return await sc.get_rows(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_TRANSACTIONS,
+            )
+        rows = await google_api.call(box, _do_get)
+
         candidates = [r for r in rows if r["Статус"] == STATUS_ACTIVE and r["Кто"] == who]
         if not candidates:
             return None
         candidates.sort(key=lambda r: r["Дата и время"], reverse=True)
         last = candidates[0]
-        await sc.update_cell(
-            session, account["google_access_token"], account["google_spreadsheet_id"],
-            sc.SHEET_TRANSACTIONS, last["ID"], "Статус", STATUS_DELETED,
-        )
+
+        async def _do_update(token):
+            return await sc.update_cell(
+                session, token, account["google_spreadsheet_id"],
+                sc.SHEET_TRANSACTIONS, last["ID"], "Статус", STATUS_DELETED,
+            )
+        await google_api.call(box, _do_update)
+
     return last

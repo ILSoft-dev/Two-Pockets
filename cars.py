@@ -1,45 +1,61 @@
 """
 cars.py
-v1.0 - car registry + mileage logging, backed by Google Sheets (sheets_client.py)
+v1.1 - car registry + mileage logging, backed by Google Sheets (sheets_client.py)
+
+Changelog:
+- v1.1: functions now take the full `account` dict (needs "id" and
+        "google_refresh_token", not just access_token+spreadsheet_id) so
+        every Sheets API call can go through google_api.call() and refresh
+        an expired access token instead of failing outright.
 
 Cars live in the "Машины" tab (registry: name + status) and mileage points
 in the "Пробег" tab. Both belong to whichever spreadsheet is the *effective*
-one for a given user at call time (their own, or the family owner's) — this
-module takes (access_token, spreadsheet_id) already resolved by the caller
-via supabase_client.get_effective_google_account(), so it has no direct DB
-dependency of its own.
+one for a given user at call time (their own, or the family owner's) —
+callers pass in the account dict already resolved via
+supabase_client.get_effective_google_account().
 """
 import re
 
 import aiohttp
 
 import sheets_client as sc
+import google_api
 
 STATUS_ACTIVE = "Активна"
 STATUS_ARCHIVED = "Архив"
 
 
-async def add_car(access_token: str, spreadsheet_id: str, name: str,
-                  who: str = "", starting_mileage: float | None = None) -> str:
+async def add_car(account: dict, name: str, who: str = "",
+                  starting_mileage: float | None = None) -> str:
     """Register a new car. If a starting mileage is given, also logs it as
     the first point in the mileage history (source: manual input) so
     average-km/month math has a real anchor from day one."""
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        car_id = await sc.append_row(
-            session, access_token, spreadsheet_id, sc.SHEET_CARS,
-            [name, STATUS_ACTIVE, sc.now_iso(), ""],
-        )
-        if starting_mileage is not None:
-            await sc.append_row(
-                session, access_token, spreadsheet_id, sc.SHEET_MILEAGE,
-                [sc.now_iso(), name, starting_mileage, "Ручной ввод", who],
+        async def _do_car(token):
+            return await sc.append_row(
+                session, token, account["google_spreadsheet_id"], sc.SHEET_CARS,
+                [name, STATUS_ACTIVE, sc.now_iso(), ""],
             )
+        car_id = await google_api.call(box, _do_car)
+
+        if starting_mileage is not None:
+            async def _do_mileage(token):
+                return await sc.append_row(
+                    session, token, account["google_spreadsheet_id"], sc.SHEET_MILEAGE,
+                    [sc.now_iso(), name, starting_mileage, "Ручной ввод", who],
+                )
+            await google_api.call(box, _do_mileage)
+
     return car_id
 
 
-async def list_active_cars(access_token: str, spreadsheet_id: str) -> list[dict]:
+async def list_active_cars(account: dict) -> list[dict]:
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        rows = await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_CARS)
+        async def _do(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_CARS)
+        rows = await google_api.call(box, _do)
     return [r for r in rows if r["Статус"] == STATUS_ACTIVE]
 
 
@@ -54,13 +70,15 @@ def match_car_name(text: str, active_cars: list[dict]) -> str | None:
     return None
 
 
-async def get_latest_mileage(access_token: str, spreadsheet_id: str,
-                             car_name: str) -> float | None:
+async def get_latest_mileage(account: dict, car_name: str) -> float | None:
     """Most recent mileage point for a car — used both for the reminder's
     'Без изменений' button (re-log the same value with today's date) and,
     later, for average-km/month math."""
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        rows = await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_MILEAGE)
+        async def _do(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_MILEAGE)
+        rows = await google_api.call(box, _do)
     points = [r for r in rows if r["Машина"] == car_name]
     if not points:
         return None
@@ -68,23 +86,32 @@ async def get_latest_mileage(access_token: str, spreadsheet_id: str,
     return sc.to_float(points[0]["Пробег"])
 
 
-async def archive_and_export_car(access_token: str, spreadsheet_id: str, car_id: str) -> str | None:
+async def archive_and_export_car(account: dict, car_id: str) -> str | None:
     """Removes a car from active tracking (soft — Статус -> Архив, no data
     deleted from the main spreadsheet) and exports its full history (auto
     expenses + mileage points) as a standalone spreadsheet with a summary
     tab. Returns the export's shareable link, or None if the car wasn't
     found (e.g. already removed)."""
+    box = google_api.TokenBox(account)
+    spreadsheet_id = account["google_spreadsheet_id"]
+
     async with aiohttp.ClientSession() as session:
-        cars_rows = await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_CARS)
+        async def _get_cars(token):
+            return await sc.get_rows(session, token, spreadsheet_id, sc.SHEET_CARS)
+        cars_rows = await google_api.call(box, _get_cars)
+
         car_row = next((c for c in cars_rows if c["ID"] == car_id), None)
         if not car_row:
             return None
         car_name = car_row["Машина"]
 
-        auto_rows = [r for r in await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_AUTO)
-                    if r["Машина"] == car_name]
-        mileage_rows = [r for r in await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_MILEAGE)
-                       if r["Машина"] == car_name]
+        async def _get_auto(token):
+            return await sc.get_rows(session, token, spreadsheet_id, sc.SHEET_AUTO)
+        auto_rows = [r for r in await google_api.call(box, _get_auto) if r["Машина"] == car_name]
+
+        async def _get_mileage(token):
+            return await sc.get_rows(session, token, spreadsheet_id, sc.SHEET_MILEAGE)
+        mileage_rows = [r for r in await google_api.call(box, _get_mileage) if r["Машина"] == car_name]
 
         total_spent = sum(sc.to_float(r["Сумма"]) for r in auto_rows)
         by_type: dict[str, float] = {}
@@ -109,15 +136,22 @@ async def archive_and_export_car(access_token: str, spreadsheet_id: str, car_id:
         auto_export = [auto_headers] + [[r[h] for h in auto_headers] for r in auto_rows]
         mileage_export = [mileage_headers] + [[r[h] for h in mileage_headers] for r in mileage_rows]
 
-        export_id = await sc.create_plain_spreadsheet(
-            session, access_token, f"Архив: {car_name}",
-            {"Сводка": summary_rows, "Траты": auto_export, "Пробег": mileage_export},
-        )
-        link = await sc.publish_and_get_url(session, access_token, export_id)
+        async def _create_export(token):
+            return await sc.create_plain_spreadsheet(
+                session, token, f"Архив: {car_name}",
+                {"Сводка": summary_rows, "Траты": auto_export, "Пробег": mileage_export},
+            )
+        export_id = await google_api.call(box, _create_export)
 
-        await sc.update_cell(
-            session, access_token, spreadsheet_id, sc.SHEET_CARS, car_id, "Статус", STATUS_ARCHIVED
-        )
+        async def _publish(token):
+            return await sc.publish_and_get_url(session, token, export_id)
+        link = await google_api.call(box, _publish)
+
+        async def _archive(token):
+            return await sc.update_cell(
+                session, token, spreadsheet_id, sc.SHEET_CARS, car_id, "Статус", STATUS_ARCHIVED
+            )
+        await google_api.call(box, _archive)
 
     return link
 

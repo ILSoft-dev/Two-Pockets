@@ -12,6 +12,7 @@ Changelog:
         so parse_amount would otherwise reject them) get a dedicated branch
         that shares the same car-disambiguation flow.
 """
+import logging
 import re
 
 from aiogram import Router, F
@@ -64,7 +65,11 @@ async def resolve_expense_category(user_id: int, remainder: str) -> tuple[str, b
         return kw_category, False
 
     categories = [c["name"] for c in db.get_categories(user_id)]
-    guessed = groq_client.categorize_text(remainder, categories)
+    try:
+        guessed = groq_client.categorize_text(remainder, categories)
+    except Exception:
+        logging.exception("resolve_expense_category: Groq categorize_text failed")
+        return "Разное", True  # сбой LLM — не роняем сообщение, просто спросим юзера
     return guessed, guessed == "Разное"
 
 
@@ -85,6 +90,13 @@ async def save_and_confirm(message: Message, user_id: int, who: str, amount: flo
     except tx.NoGoogleAccount:
         await message.answer("Google Drive не подключён — пройди заново /start, чтобы подключить.")
         return
+    except Exception:
+        logging.exception("save_and_confirm: unexpected error writing to Sheets")
+        await message.answer(
+            "Не получилось сохранить в Google Диск. Если повторится — "
+            "переподключи через /start."
+        )
+        return
     await react_ok(message)
 
 
@@ -96,6 +108,13 @@ async def finalize_auto_expense(message: Message, user_id: int, who: str, amount
                                    description, mileage, source)
     except tx.NoGoogleAccount:
         await message.answer("Google Drive не подключён — пройди заново /start, чтобы подключить.")
+        return
+    except Exception:
+        logging.exception("finalize_auto_expense: unexpected error writing to Sheets")
+        await message.answer(
+            "Не получилось сохранить в Google Диск. Если повторится — "
+            "переподключи через /start."
+        )
         return
     await react_ok(message)
     if mileage is not None:
@@ -114,10 +133,15 @@ async def ask_car_disambiguation(message: Message, state: FSMContext, active_car
 async def route_auto_expense(message: Message, state: FSMContext, user_id: int, who: str,
                              amount: float, tx_type: str, source: str, remainder: str):
     account = db.get_effective_google_account(user_id)
-    active_cars = (
-        await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
-        if account else []
-    )
+    try:
+        active_cars = await cars.list_active_cars(account) if account else []
+    except Exception:
+        logging.exception("route_auto_expense: unexpected error listing cars")
+        await message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
+        return
 
     matched_name = cars.match_car_name(remainder, active_cars)
     mileage = auto_expense.extract_mileage(remainder)
@@ -154,10 +178,15 @@ async def handle_mileage_message(message: Message, state: FSMContext, user_id: i
         return
 
     account = db.get_effective_google_account(user_id)
-    active_cars = (
-        await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
-        if account else []
-    )
+    try:
+        active_cars = await cars.list_active_cars(account) if account else []
+    except Exception:
+        logging.exception("handle_mileage_message: unexpected error listing cars")
+        await message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
+        return
     matched_name = cars.match_car_name(leftover, active_cars)
 
     if matched_name:
@@ -174,13 +203,19 @@ async def handle_mileage_message(message: Message, state: FSMContext, user_id: i
 async def maybe_warn_fluids(message: Message, user_id: int, car_name: str, mileage: float):
     """Called after every fresh mileage point (standalone update, reminder
     'без изменений', or a repair message that mentioned mileage) — checks
-    whether any tracked fluid is due soon and warns if so."""
+    whether any tracked fluid is due soon and warns if so. Runs AFTER the
+    actual save already succeeded and was confirmed to the user, so any
+    failure here is just a missed nice-to-have warning, not a lost
+    transaction — still worth catching so it doesn't surface as a scary
+    unhandled exception in the logs for something non-critical."""
     account = db.get_effective_google_account(user_id)
     if not account:
         return
-    due = await fluid_tracker.check_due_fluids(
-        account["google_access_token"], account["google_spreadsheet_id"], car_name, mileage
-    )
+    try:
+        due = await fluid_tracker.check_due_fluids(account, car_name, mileage)
+    except Exception:
+        logging.exception("maybe_warn_fluids: unexpected error checking fluids")
+        return
     if due:
         await message.answer(fluid_tracker.format_due_warning(due, car_name))
 
@@ -191,6 +226,13 @@ async def save_mileage_and_confirm(message: Message, user_id: int, who: str,
         await tx.save_mileage_point(user_id, who, car_name, mileage)
     except tx.NoGoogleAccount:
         await message.answer("Google Drive не подключён — пройди заново /start, чтобы подключить.")
+        return
+    except Exception:
+        logging.exception("save_mileage_and_confirm: unexpected error writing to Sheets")
+        await message.answer(
+            "Не получилось сохранить в Google Диск. Если повторится — "
+            "переподключи через /start."
+        )
         return
     await message.answer(f"Записал пробег «{car_name}»: {mileage:g} км")
     await maybe_warn_fluids(message, user_id, car_name, mileage)
@@ -211,24 +253,32 @@ async def mileage_unchanged(callback: CallbackQuery):
         await callback.answer()
         return
 
-    active_cars = await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
-    car_row = next((c for c in active_cars if c["ID"] == car_id), None)
-    if not car_row:
-        await callback.message.edit_text("Не нашёл эту машину — возможно, её уже удалили.")
-        await callback.answer()
-        return
+    try:
+        active_cars = await cars.list_active_cars(account)
+        car_row = next((c for c in active_cars if c["ID"] == car_id), None)
+        if not car_row:
+            await callback.message.edit_text("Не нашёл эту машину — возможно, её уже удалили.")
+            await callback.answer()
+            return
 
-    last_mileage = await cars.get_latest_mileage(
-        account["google_access_token"], account["google_spreadsheet_id"], car_row["Машина"]
-    )
-    if last_mileage is None:
-        await callback.message.edit_text(
-            f"Нет предыдущих записей пробега для «{car_row['Машина']}» — напиши пробег вручную."
+        last_mileage = await cars.get_latest_mileage(account, car_row["Машина"])
+        if last_mileage is None:
+            await callback.message.edit_text(
+                f"Нет предыдущих записей пробега для «{car_row['Машина']}» — напиши пробег вручную."
+            )
+            await callback.answer()
+            return
+
+        await tx.save_mileage_point(user["id"], who, car_row["Машина"], last_mileage, source="Без изменений")
+    except Exception:
+        logging.exception("mileage_unchanged: unexpected error")
+        await callback.message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
         )
         await callback.answer()
         return
 
-    await tx.save_mileage_point(user["id"], who, car_row["Машина"], last_mileage, source="Без изменений")
     await callback.message.edit_text(f"Записал: «{car_row['Машина']}» без изменений ({last_mileage:g} км)")
     await maybe_warn_fluids(callback.message, user["id"], car_row["Машина"], last_mileage)
     await callback.answer()
@@ -240,10 +290,16 @@ async def car_choice_picked(callback: CallbackQuery, state: FSMContext):
     car_id = callback.data.split(":", 1)[1]
     user = db.get_or_create_user(callback.from_user.id, callback.from_user.username)
     account = db.get_effective_google_account(user["id"])
-    active_cars = (
-        await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
-        if account else []
-    )
+    try:
+        active_cars = await cars.list_active_cars(account) if account else []
+    except Exception:
+        logging.exception("car_choice_picked: unexpected error listing cars")
+        await callback.message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
+        await callback.answer()
+        return
     car_row = next((c for c in active_cars if c["ID"] == car_id), None)
     car_name = car_row["Машина"] if car_row else "?"
 
@@ -269,7 +325,15 @@ async def new_car_named(message: Message, state: FSMContext):
     who = who_label(message.from_user)
     account = db.get_effective_google_account(user["id"])
     if account:
-        await cars.add_car(account["google_access_token"], account["google_spreadsheet_id"], name, who=who)
+        try:
+            await cars.add_car(account, name, who=who)
+        except Exception:
+            logging.exception("new_car_named: unexpected error adding car")
+            await message.answer(
+                "Не получилось сохранить машину в Google Диск. Если "
+                "повторится — переподключи через /start."
+            )
+            return
 
     await resolve_pending_intent(message, state, user["id"], message.from_user, name)
 
@@ -387,7 +451,12 @@ async def process_text_input(message: Message, state: FSMContext, text: str, sou
 async def handle_voice(message: Message, state: FSMContext):
     file = await message.bot.get_file(message.voice.file_id)
     file_bytes = await message.bot.download_file(file.file_path)
-    text = groq_client.transcribe_voice(file_bytes.read(), filename="voice.ogg")
+    try:
+        text = groq_client.transcribe_voice(file_bytes.read(), filename="voice.ogg")
+    except Exception:
+        logging.exception("handle_voice: Groq transcribe_voice failed")
+        await message.answer("Не удалось распознать голос (сбой сервиса), попробуй ещё раз или напиши текстом.")
+        return
     if not text:
         await message.answer("Не удалось распознать голос, попробуй ещё раз.")
         return
@@ -404,7 +473,15 @@ async def handle_receipt_photo(message: Message, state: FSMContext):
     largest_photo = message.photo[-1]
     file = await message.bot.get_file(largest_photo.file_id)
     file_bytes = await message.bot.download_file(file.file_path)
-    total = groq_client.extract_receipt_total(file_bytes.read())
+    try:
+        total = groq_client.extract_receipt_total(file_bytes.read())
+    except Exception:
+        logging.exception("handle_receipt_photo: Groq extract_receipt_total failed")
+        await message.answer(
+            "Не смог обработать фото (сбой сервиса). Попробуй ещё раз "
+            "или напиши сумму текстом."
+        )
+        return
 
     if total is None:
         await message.answer("Не смог распознать сумму на чеке. Попробуй сфотографировать чётче.")

@@ -1,8 +1,15 @@
 """
 car_stats_command.py
-v1.0 - /carstats: on-demand narrative statistics for a chosen car, current
+v1.1 - /carstats: on-demand narrative statistics for a chosen car, current
 reporting period (same month_start setting /report already uses).
+
+Changelog:
+- v1.1: wrapped every Sheets-touching call in try/except so a Google API
+        failure (even after google_api.py's refresh-retry) gives the user
+        a clear message instead of silently doing nothing.
 """
+import logging
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -15,6 +22,11 @@ from report import period_start
 
 router = Router()
 
+SHEETS_ERROR_TEXT = (
+    "Не получилось обратиться к Google Диску. Если повторится — "
+    "переподключи через /start."
+)
+
 
 def _car_stats_keyboard(active_cars: list[dict]):
     builder = InlineKeyboardBuilder()
@@ -26,9 +38,12 @@ def _car_stats_keyboard(active_cars: list[dict]):
 
 async def send_car_stats(message: Message, user: dict, account: dict, car_row: dict):
     since = period_start(user.get("month_start", 1))
-    stats = await car_stats.car_period_stats(
-        account["google_access_token"], account["google_spreadsheet_id"], car_row["Машина"], since
-    )
+    try:
+        stats = await car_stats.car_period_stats(account, car_row["Машина"], since)
+    except Exception:
+        logging.exception("send_car_stats: unexpected error fetching stats")
+        await message.answer(SHEETS_ERROR_TEXT)
+        return
     currency = user.get("currency", "RUB")
     await message.answer(car_stats.format_stats_text(car_row["Машина"], stats, currency))
 
@@ -45,7 +60,13 @@ async def cmd_carstats(message: Message):
         await message.answer("Google Drive не подключён — пройди заново /start.")
         return
 
-    active = await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
+    try:
+        active = await cars.list_active_cars(account)
+    except Exception:
+        logging.exception("cmd_carstats: unexpected error listing cars")
+        await message.answer(SHEETS_ERROR_TEXT)
+        return
+
     if not active:
         await message.answer("Нет зарегистрированных машин. Добавь через /cars.")
         return
@@ -67,7 +88,14 @@ async def carstat_choice_picked(callback: CallbackQuery):
         await callback.answer()
         return
 
-    active = await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
+    try:
+        active = await cars.list_active_cars(account)
+    except Exception:
+        logging.exception("carstat_choice_picked: unexpected error listing cars")
+        await callback.message.answer(SHEETS_ERROR_TEXT)
+        await callback.answer()
+        return
+
     car_row = next((c for c in active if c["ID"] == car_id), None)
     if not car_row:
         await callback.message.edit_text("Не нашёл эту машину.")

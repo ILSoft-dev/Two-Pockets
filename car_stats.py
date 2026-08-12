@@ -16,6 +16,7 @@ import aiohttp
 import supabase_client as db
 import sheets_client as sc
 import cars
+import google_api
 from report import period_start
 
 CATEGORY_LABELS = {
@@ -36,14 +37,19 @@ def _in_period(row_date, since: datetime) -> bool:
     return dt >= since
 
 
-async def car_period_stats(access_token: str, spreadsheet_id: str,
-                           car_name: str, since: datetime) -> dict:
+async def car_period_stats(account: dict, car_name: str, since: datetime) -> dict:
     """{'distance': float|None, 'total_spent': float, 'by_type': {type: amount}}
     distance is None if there's no mileage data to compute it from at all
     (car just registered, or no mileage ever logged)."""
+    box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
-        auto_rows = await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_AUTO)
-        mileage_rows = await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_MILEAGE)
+        async def _get_auto(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_AUTO)
+        auto_rows = await google_api.call(box, _get_auto)
+
+        async def _get_mileage(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_MILEAGE)
+        mileage_rows = await google_api.call(box, _get_mileage)
 
     car_auto = [r for r in auto_rows if r["Машина"] == car_name and r["Статус"] == "Активна"]
     period_auto = [r for r in car_auto if _in_period(r["Дата"], since)]
@@ -111,9 +117,7 @@ async def run_monthly_stats_sweep(bot) -> int:
         if not _is_period_end_today(month_start_day):
             continue
 
-        active_cars = await cars.list_active_cars(
-            account["google_access_token"], account["google_spreadsheet_id"]
-        )
+        active_cars = await cars.list_active_cars(account)
         if not active_cars:
             continue
 
@@ -122,10 +126,7 @@ async def run_monthly_stats_sweep(bot) -> int:
         recipients = db.get_spreadsheet_recipients(account["id"])
 
         for car in active_cars:
-            stats = await car_period_stats(
-                account["google_access_token"], account["google_spreadsheet_id"],
-                car["Машина"], since,
-            )
+            stats = await car_period_stats(account, car["Машина"], since)
             text = format_stats_text(car["Машина"], stats, currency, period_label="этот месяц")
             for tg_id in recipients:
                 try:

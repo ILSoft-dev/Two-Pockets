@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -216,12 +218,18 @@ async def save_car_and_continue(message: Message, state: FSMContext, mileage: fl
     account = db.get_google_account(user["id"])
 
     if account:
-        await cars.add_car(
-            account["google_access_token"], account["google_spreadsheet_id"],
-            name, who=message.chat.username or str(message.chat.id),
-            starting_mileage=mileage,
-        )
-        await message.answer(f"«{name}» добавлена ✅")
+        try:
+            await cars.add_car(
+                account, name, who=message.chat.username or str(message.chat.id),
+                starting_mileage=mileage,
+            )
+            await message.answer(f"«{name}» добавлена ✅")
+        except Exception:
+            logging.exception("save_car_and_continue: unexpected error adding car")
+            await message.answer(
+                f"«{name}» запомнил, но не смог сохранить — ошибка обращения "
+                "к Google Диску. Добери машину позже через /cars."
+            )
     else:
         # Не должно происходить в норме (Google подключается раньше этого
         # шага), но на случай гонки/ошибки — не роняем онбординг.

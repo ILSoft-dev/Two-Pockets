@@ -7,6 +7,8 @@ Sheets — колонка "Статус" -> "Удалена", не физиче�
 него ссылались — v0.1 был минимальной заглушкой на Supabase; здесь просто
 переключил ту же логику на новое хранилище.
 """
+import logging
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -30,6 +32,13 @@ async def cmd_undo(message: Message):
         deleted = await tx.soft_delete_last(user["id"], who)
     except tx.NoGoogleAccount:
         await message.answer("Google Drive не подключён — пройди заново /start, чтобы подключить.")
+        return
+    except Exception:
+        logging.exception("undo: unexpected error updating Sheets")
+        await message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
         return
 
     if not deleted:

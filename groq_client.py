@@ -3,7 +3,7 @@
 - categorize_text  — LLM подбирает категорию из списка (fallback, если
   парсер по ключевым словам и category_map не справились)
 - transcribe_voice  — Whisper large-v3, голос -> текст
-- extract_receipt_total — Vision (llama-4-scout), фото чека -> сумма
+- extract_receipt_total — Vision (qwen3.6-27b), фото чека -> сумма
 """
 import base64
 import re
@@ -13,8 +13,11 @@ from config import GROQ_API_KEY
 
 client = Groq(api_key=GROQ_API_KEY)
 
-TEXT_MODEL = "llama-4-scout-17b-16e-instruct"
-VISION_MODEL = "llama-4-scout-17b-16e-instruct"
+# llama-4-scout-17b-16e-instruct отключена Groq 17 июня 2026 (см.
+# console.groq.com/docs/deprecations) — рекомендованные замены: gpt-oss-120b
+# для чистого текста, qwen3.6-27b для мультимодальных (vision) задач.
+TEXT_MODEL = "openai/gpt-oss-120b"
+VISION_MODEL = "qwen/qwen3.6-27b"
 WHISPER_MODEL = "whisper-large-v3"
 
 

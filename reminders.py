@@ -1,11 +1,17 @@
 """
 reminders.py
-v1.0 - weekly mileage check-in reminders
+v1.1 - weekly mileage check-in reminders
 
-Triggered by an external cron ping (see main.py's /cron/mileage-reminders
-route — same UptimeRobot pattern already used for /health), not by any
-Telegram message from the user, since this needs to fire proactively on a
-schedule regardless of whether anyone talks to the bot that day.
+Changelog:
+- v1.1: the "mark as reminded" update_cell call now goes through
+        google_api.call() too (was the one remaining raw call using
+        account["google_access_token"] directly, unprotected against an
+        expired token).
+
+Triggered by an external cron ping (see main.py's /cron/daily route — same
+UptimeRobot pattern already used for /health), not by any Telegram message
+from the user, since this needs to fire proactively on a schedule
+regardless of whether anyone talks to the bot that day.
 
 Each car tracks its OWN "Последнее напоминание" timestamp independently
 (Машины sheet) — with cars typically registered at different times, this
@@ -19,6 +25,7 @@ import aiohttp
 import supabase_client as db
 import sheets_client as sc
 import cars
+import google_api
 from keyboards import mileage_reminder_keyboard
 
 REMINDER_INTERVAL_DAYS = 7
@@ -49,15 +56,15 @@ async def run_reminder_sweep(bot) -> int:
     sent = 0
 
     for account in db.list_google_connected_users():
-        async with aiohttp.ClientSession() as session:
-            active_cars = await cars.list_active_cars(
-                account["google_access_token"], account["google_spreadsheet_id"]
-            )
-            due_cars = [c for c in active_cars if _due(c)]
-            if not due_cars:
-                continue
+        active_cars = await cars.list_active_cars(account)
+        due_cars = [c for c in active_cars if _due(c)]
+        if not due_cars:
+            continue
 
-            recipients = db.get_spreadsheet_recipients(account["id"])
+        recipients = db.get_spreadsheet_recipients(account["id"])
+        box = google_api.TokenBox(account)
+
+        async with aiohttp.ClientSession() as session:
             for car in due_cars:
                 for tg_id in recipients:
                     try:
@@ -72,9 +79,11 @@ async def run_reminder_sweep(bot) -> int:
                         # роняем весь sweep из-за одного недоступного адресата.
                         pass
 
-                await sc.update_cell(
-                    session, account["google_access_token"], account["google_spreadsheet_id"],
-                    sc.SHEET_CARS, car["ID"], "Последнее напоминание", sc.now_iso(),
-                )
+                async def _mark_reminded(token, car=car):
+                    return await sc.update_cell(
+                        session, token, account["google_spreadsheet_id"],
+                        sc.SHEET_CARS, car["ID"], "Последнее напоминание", sc.now_iso(),
+                    )
+                await google_api.call(box, _mark_reminded)
 
     return sent

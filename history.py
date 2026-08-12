@@ -3,6 +3,8 @@ history.py
 v2.0 - /history, now reading from Google Sheets (sheets_transactions) instead
 of Supabase — see input_handler.py v2.0 changelog for why.
 """
+import logging
+
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -30,6 +32,13 @@ async def cmd_history(message: Message, command: CommandObject):
         rows = await tx.get_history(user["id"], days)
     except tx.NoGoogleAccount:
         await message.answer("Google Drive не подключён — пройди заново /start, чтобы подключить.")
+        return
+    except Exception:
+        logging.exception("history: unexpected error fetching from Sheets")
+        await message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
         return
     currency = user.get("currency", "RUB")
 

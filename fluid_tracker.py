@@ -1,6 +1,13 @@
 """
 fluid_tracker.py
-v1.0 - technical fluid replacement tracking (oil, antifreeze, etc.)
+v1.1 - technical fluid replacement tracking (oil, antifreeze, etc.)
+
+Changelog:
+- v1.1: check_due_fluids now fetches the Авто sheet ONCE and checks all
+        fluid types against that single result, instead of doing 5
+        separate Sheets API calls (one per fluid type) for data that
+        never changes between them. Also now goes through google_api.call()
+        so an expired token gets refreshed instead of failing the check.
 
 No engine-specific numbers hardcoded (the family has two different cars) —
 generic, commonly-cited intervals per fluid TYPE, easy to adjust below if
@@ -11,6 +18,7 @@ keywords — no extra column/schema needed, reuses what's already stored.
 import aiohttp
 
 import sheets_client as sc
+import google_api
 
 FLUID_INTERVALS_KM = {
     "Масло": 10_000,
@@ -49,37 +57,33 @@ def detect_fluid_type(text: str) -> str | None:
     return None
 
 
-async def get_last_replacement_mileage(access_token: str, spreadsheet_id: str,
-                                       car_name: str, fluid: str) -> float | None:
-    """Deliberately does NOT require Тип=='Ремонт' — auto_expense's type
-    heuristic and this module's fluid-keyword detection are independent
-    classifiers that can disagree (e.g. "заправил антифриза" trips the
-    Заправка keyword in auto_expense but is clearly an antifreeze
-    replacement here). Matching on the fluid keyword alone is more robust
-    than requiring both heuristics to agree."""
-    async with aiohttp.ClientSession() as session:
-        rows = await sc.get_rows(session, access_token, spreadsheet_id, sc.SHEET_AUTO)
-    candidates = []
-    for r in rows:
-        if r["Машина"] != car_name:
-            continue
-        if detect_fluid_type(str(r["Описание"])) != fluid:
-            continue
-        if r["Пробег"]:
-            candidates.append(sc.to_float(r["Пробег"]))
-    return max(candidates) if candidates else None
-
-
-async def check_due_fluids(access_token: str, spreadsheet_id: str, car_name: str,
-                           current_mileage: float) -> list[dict]:
+async def check_due_fluids(account: dict, car_name: str, current_mileage: float) -> list[dict]:
     """Fluids at/past the warning threshold. Fluids with NO logged
     replacement at all are silently skipped — we have no baseline to
-    measure from, so flagging them would just be noise, not signal."""
+    measure from, so flagging them would just be noise, not signal.
+    Deliberately does NOT require Тип=='Ремонт' on rows — auto_expense's
+    type heuristic and this module's fluid-keyword detection are
+    independent classifiers that can disagree (e.g. "заправил антифриза"
+    trips the Заправка keyword in auto_expense but is clearly an antifreeze
+    replacement here); matching on the fluid keyword alone is more robust
+    than requiring both heuristics to agree."""
+    box = google_api.TokenBox(account)
+    async with aiohttp.ClientSession() as session:
+        async def _do(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_AUTO)
+        rows = await google_api.call(box, _do)
+
+    car_rows = [r for r in rows if r["Машина"] == car_name]
+
     due = []
     for fluid, interval in FLUID_INTERVALS_KM.items():
-        last_at = await get_last_replacement_mileage(access_token, spreadsheet_id, car_name, fluid)
-        if last_at is None:
+        candidates = [
+            sc.to_float(r["Пробег"]) for r in car_rows
+            if r["Пробег"] and detect_fluid_type(str(r["Описание"])) == fluid
+        ]
+        if not candidates:
             continue
+        last_at = max(candidates)
         due_at = last_at + interval
         remaining = due_at - current_mileage
         if remaining <= interval * WARN_FRACTION:

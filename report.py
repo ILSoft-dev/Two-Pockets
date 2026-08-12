@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from aiogram import Router
 from aiogram.filters import Command
@@ -36,6 +37,13 @@ async def cmd_report(message: Message):
         data = await tx.get_report(user["id"], since)
     except tx.NoGoogleAccount:
         await message.answer("Google Drive не подключён — пройди заново /start, чтобы подключить.")
+        return
+    except Exception:
+        logging.exception("report: unexpected error fetching from Sheets")
+        await message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
         return
     currency = user.get("currency", "RUB")
 

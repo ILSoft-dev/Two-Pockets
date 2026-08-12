@@ -7,6 +7,8 @@ kept separate from the onboarding car-registration flow in start.py (same
 underlying cars.add_car(), different FSM states so the two flows don't
 collide or need to know about each other).
 """
+import logging
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -29,7 +31,15 @@ async def _active_cars_or_none(message: Message, user_id: int):
     if not account:
         await message.answer("Сначала подключи Google Drive: /start")
         return None, None
-    active = await cars.list_active_cars(account["google_access_token"], account["google_spreadsheet_id"])
+    try:
+        active = await cars.list_active_cars(account)
+    except Exception:
+        logging.exception("_active_cars_or_none: unexpected error listing cars")
+        await message.answer(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
+        return None, None
     return account, active
 
 
@@ -87,10 +97,16 @@ async def car_manage_mileage_entered(message: Message, state: FSMContext):
     who = who_label(message.from_user)
     account = db.get_effective_google_account(user["id"])
     if account:
-        await cars.add_car(
-            account["google_access_token"], account["google_spreadsheet_id"],
-            name, who=who, starting_mileage=mileage,
-        )
+        try:
+            await cars.add_car(account, name, who=who, starting_mileage=mileage)
+        except Exception:
+            logging.exception("car_manage_mileage_entered: unexpected error adding car")
+            await message.answer(
+                "Не получилось сохранить машину в Google Диск. Если "
+                "повторится — переподключи через /start."
+            )
+            await state.clear()
+            return
         await message.answer(f"«{name}» добавлена ✅")
     else:
         await message.answer("Google Drive не подключён — пройди заново /start.")
@@ -126,9 +142,17 @@ async def car_remove_execute(callback: CallbackQuery):
         await callback.answer()
         return
 
-    link = await cars.archive_and_export_car(
-        account["google_access_token"], account["google_spreadsheet_id"], car_id
-    )
+    try:
+        link = await cars.archive_and_export_car(account, car_id)
+    except Exception:
+        logging.exception("car_remove_execute: unexpected error archiving car")
+        await callback.message.edit_text(
+            "Не получилось обратиться к Google Диску. Если повторится — "
+            "переподключи через /start."
+        )
+        await callback.answer()
+        return
+
     if link is None:
         await callback.message.edit_text("Не нашёл эту машину — возможно, уже удалена.")
     else:
