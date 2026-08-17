@@ -17,6 +17,7 @@ from google_oauth_web import oauth_callback
 import supabase_client as db
 import reminders
 import car_stats
+import narrative_report
 
 # Роутеры — порядок важен! Команды и FSM-специфичные хендлеры должны
 # регистрироваться РАНЬШЕ input_handler (там generic F.text/F.voice/F.photo,
@@ -55,16 +56,20 @@ async def health_check(request):
 
 
 async def daily_cron(request: web.Request) -> web.Response:
-    """Одна ежедневная задача вместо двух: и напоминания о пробеге
-    (раз в неделю на машину — reminders.py сам решает, кому пора), и
-    ежемесячная статистика (car_stats.py сам решает, у кого сегодня конец
-    периода). Один пинг UptimeRobot закрывает обе."""
+    """Одна ежедневная задача вместо трёх: напоминания о пробеге (раз в
+    неделю на машину — reminders.py сам решает, кому пора), ежемесячная
+    статистика (car_stats.py сам решает, у кого сегодня конец периода), и
+    годовой отчёт (narrative_report.py сам решает, 1 января ли сегодня и
+    не отправляли ли уже в этом году). Один пинг UptimeRobot закрывает все три."""
     if CRON_SECRET and request.query.get("secret") != CRON_SECRET:
         return web.Response(status=403, text="forbidden")
     bot = request.app["bot"]
     reminders_sent = await reminders.run_reminder_sweep(bot)
     stats_sent = await car_stats.run_monthly_stats_sweep(bot)
-    return web.Response(text=f"ok, reminders_sent={reminders_sent}, stats_sent={stats_sent}")
+    annual_sent = await narrative_report.run_annual_report_sweep(bot)
+    return web.Response(
+        text=f"ok, reminders_sent={reminders_sent}, stats_sent={stats_sent}, annual_sent={annual_sent}"
+    )
 
 
 async def run_health_server(bot: Bot, storage):

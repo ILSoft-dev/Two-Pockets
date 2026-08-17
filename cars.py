@@ -70,6 +70,44 @@ def match_car_name(text: str, active_cars: list[dict]) -> str | None:
     return None
 
 
+async def get_auto_expenses_in_range(account: dict, car_name: str, since, until) -> list[dict]:
+    """Строки листа 'Авто' для конкретной машины в диапазоне дат — нужно
+    для чат-вопросов вида 'сколько на бензин для опеля', где важна и
+    машина, и товар/тип одновременно. Обычный поиск по общему листу
+    'Транзакции' не видит колонку 'Машина' вообще — она есть только здесь."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    box = google_api.TokenBox(account)
+    async with aiohttp.ClientSession() as session:
+        async def _do(token):
+            return await sc.get_rows(session, token, account["google_spreadsheet_id"], sc.SHEET_AUTO)
+        rows = await google_api.call(box, _do)
+
+    def _parse(value):
+        try:
+            dt = _dt.fromisoformat(str(value))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+
+    since_aware = since if (since is None or since.tzinfo) else since.replace(tzinfo=_tz.utc)
+    until_aware = until if (until is None or until.tzinfo) else until.replace(tzinfo=_tz.utc)
+
+    result = []
+    for r in rows:
+        if r["Машина"] != car_name or r.get("Статус") != STATUS_ACTIVE:
+            continue
+        dt = _parse(r["Дата"])
+        if dt is None:
+            continue
+        if since_aware is not None and dt < since_aware:
+            continue
+        if until_aware is not None and dt > until_aware:
+            continue
+        result.append(r)
+    return result
+
+
 async def get_mileage_distance(account: dict, car_name: str,
                                since, until) -> float | None:
     """Пройденное расстояние в диапазоне [since, until] (любая из границ
