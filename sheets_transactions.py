@@ -151,16 +151,13 @@ async def get_history(user_id: int, days: int) -> list[dict]:
     return await get_transactions_since(user_id, since)
 
 
-async def get_transactions_in_range_for_account(account: dict, since: datetime | None,
-                                                until: datetime | None) -> list[dict]:
-    """Как get_transactions_in_range, но принимает уже готовый account
-    (не user_id) — нужно для cron-обходов (см. narrative_report.py),
-    которые, как и reminders.py/car_stats.py, читают КАЖДУЮ личную таблицу
-    ровно один раз напрямую. Если бы вместо этого резолвился "эффективный"
-    аккаунт по user_id — для семьи из двух участников таблица владельца
-    читалась и отправлялась бы ДВАЖДЫ (по разу на каждого участника семьи,
-    у которых у обоих get_effective_google_account указывает на одну и ту
-    же таблицу)."""
+async def get_transactions_in_range(user_id: int, since: datetime | None,
+                                    until: datetime | None) -> list[dict]:
+    """Как get_transactions_since, но с обеими границами — нужно для
+    вопросов про конкретный прошлый месяц ("сколько потратил в июне"), где
+    важно НЕ захватить данные после конца месяца. since/until=None —
+    открытая граница с этой стороны."""
+    account = _get_account(user_id)
     box = google_api.TokenBox(account)
     async with aiohttp.ClientSession() as session:
         async def _do(token):
@@ -186,18 +183,6 @@ async def get_transactions_in_range_for_account(account: dict, since: datetime |
         if until is not None and dt > until:
             continue
         result.append(r)
-    result.sort(key=lambda r: r["Дата и время"], reverse=True)
-    return result
-
-
-async def get_transactions_in_range(user_id: int, since: datetime | None,
-                                    until: datetime | None) -> list[dict]:
-    """Как get_transactions_since, но с обеими границами — нужно для
-    вопросов про конкретный прошлый месяц ("сколько потратил в июне"), где
-    важно НЕ захватить данные после конца месяца. since/until=None —
-    открытая граница с этой стороны."""
-    account = _get_account(user_id)
-    return await get_transactions_in_range_for_account(account, since, until)
     result.sort(key=lambda r: r["Дата и время"], reverse=True)
     return result
 

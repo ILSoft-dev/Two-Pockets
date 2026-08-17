@@ -7,9 +7,6 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand
 from aiohttp import web
-from redis.asyncio.retry import Retry
-from redis.backoff import ExponentialBackoff
-from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 from config import BOT_TOKEN, REDIS_URL, PORT, CRON_SECRET, SUPABASE_KEEPALIVE_INTERVAL_SECONDS
 from middlewares import PinMiddleware
@@ -17,7 +14,6 @@ from google_oauth_web import oauth_callback
 import supabase_client as db
 import reminders
 import car_stats
-import narrative_report
 
 # Роутеры — порядок важен! Команды и FSM-специфичные хендлеры должны
 # регистрироваться РАНЬШЕ input_handler (там generic F.text/F.voice/F.photo,
@@ -56,20 +52,16 @@ async def health_check(request):
 
 
 async def daily_cron(request: web.Request) -> web.Response:
-    """Одна ежедневная задача вместо трёх: напоминания о пробеге (раз в
-    неделю на машину — reminders.py сам решает, кому пора), ежемесячная
-    статистика (car_stats.py сам решает, у кого сегодня конец периода), и
-    годовой отчёт (narrative_report.py сам решает, 1 января ли сегодня и
-    не отправляли ли уже в этом году). Один пинг UptimeRobot закрывает все три."""
+    """Одна ежедневная задача вместо двух: и напоминания о пробеге
+    (раз в неделю на машину — reminders.py сам решает, кому пора), и
+    ежемесячная статистика (car_stats.py сам решает, у кого сегодня конец
+    периода). Один пинг UptimeRobot закрывает обе."""
     if CRON_SECRET and request.query.get("secret") != CRON_SECRET:
         return web.Response(status=403, text="forbidden")
     bot = request.app["bot"]
     reminders_sent = await reminders.run_reminder_sweep(bot)
     stats_sent = await car_stats.run_monthly_stats_sweep(bot)
-    annual_sent = await narrative_report.run_annual_report_sweep(bot)
-    return web.Response(
-        text=f"ok, reminders_sent={reminders_sent}, stats_sent={stats_sent}, annual_sent={annual_sent}"
-    )
+    return web.Response(text=f"ok, reminders_sent={reminders_sent}, stats_sent={stats_sent}")
 
 
 async def run_health_server(bot: Bot, storage):
@@ -117,24 +109,7 @@ async def run_polling_with_retry(dp: Dispatcher, bot: Bot):
 
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    # Managed Redis (free-tier) drops idle connections after a while. Without
-    # health checks / retries, the first command after a lull raises
-    # ConnectionError and the whole update fails (the *next* update works
-    # fine because redis-py silently reconnects). health_check_interval
-    # makes the client ping+refresh idle connections proactively, and
-    # retry_on_error makes it transparently retry the one broken command
-    # instead of surfacing the error to the handler.
-    storage = RedisStorage.from_url(
-        REDIS_URL,
-        connection_kwargs={
-            "health_check_interval": 30,
-            "socket_keepalive": True,
-            "socket_connect_timeout": 5,
-            "retry_on_timeout": True,
-            "retry_on_error": [RedisConnectionError, RedisTimeoutError, ConnectionResetError],
-            "retry": Retry(ExponentialBackoff(base=0.1, cap=1), retries=3),
-        },
-    )
+    storage = RedisStorage.from_url(REDIS_URL)
     dp = Dispatcher(storage=storage)
 
     dp.message.middleware(PinMiddleware())
@@ -161,4 +136,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    

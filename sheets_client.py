@@ -23,7 +23,6 @@ increment) so a specific logical row can be found and updated later (e.g.
 soft-delete on /undo) even if its physical row number shifts because of
 manual edits by the user.
 """
-import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -32,21 +31,9 @@ import aiohttp
 API = "https://sheets.googleapis.com/v4/spreadsheets"
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 
-# Google occasionally answers Sheets calls with a transient 503/500/429,
-# especially right after a period of no traffic (Render free-tier cold
-# start coinciding with a Google-side hiccup). These are worth a short
-# retry; a bare 401 is handled separately by google_api.call (token
-# refresh), and anything else is a real error worth surfacing immediately.
-_RETRYABLE_STATUSES = (500, 503, 429)
-_RETRY_DELAYS = (1, 2, 4)  # seconds, exponential backoff
-
 
 class GoogleAuthError(Exception):
     """Raised on HTTP 401 so the caller can refresh the token and retry."""
-
-
-class GoogleTransientError(Exception):
-    """Raised when Sheets keeps answering 500/503/429 after all retries."""
 
 
 def _headers(token: str) -> dict:
@@ -59,32 +46,7 @@ async def _check(resp: aiohttp.ClientResponse, ok=(200, 201)):
     if resp.status in ok:
         return
     text = await resp.text()
-    if resp.status in _RETRYABLE_STATUSES:
-        raise GoogleTransientError(f"Sheets API {resp.status}: {text}")
     raise RuntimeError(f"Sheets API {resp.status}: {text}")
-
-
-async def _request(session: aiohttp.ClientSession, method: str, url: str,
-                    ok=(200, 201), read_json: bool = False, **kwargs):
-    """Single place all Sheets/Drive HTTP calls go through. Retries
-    transient 500/503/429 responses with backoff (a plain 401 is NOT
-    retried here — it propagates immediately as GoogleAuthError so
-    google_api.call can refresh the token first, same as before).
-    Returns the parsed JSON body if read_json=True, else None. The body is
-    read inside the `async with` block so it's safe even after the
-    response/connection is released on return."""
-    last_err = None
-    for delay in (0,) + _RETRY_DELAYS:
-        if delay:
-            await asyncio.sleep(delay)
-        async with session.request(method, url, **kwargs) as resp:
-            try:
-                await _check(resp, ok=ok)
-                return await resp.json() if read_json else None
-            except GoogleTransientError as e:
-                last_err = e
-                continue
-    raise last_err
 
 
 # ------------------------------------------------------------- sheet layout ---
@@ -130,8 +92,9 @@ async def create_budget_spreadsheet(session: aiohttp.ClientSession, token: str,
         "properties": {"title": title},
         "sheets": [{"properties": {"title": name}} for name in HEADERS],
     }
-    data = await _request(session, "POST", API, ok=(200,), read_json=True,
-                          json=body, headers=_headers(token))
+    async with session.post(API, json=body, headers=_headers(token)) as resp:
+        await _check(resp, ok=(200,))
+        data = await resp.json()
     spreadsheet_id = data["spreadsheetId"]
     # Map tab title -> sheetId, needed for the formatting batchUpdate below
     sheet_ids = {s["properties"]["title"]: s["properties"]["sheetId"]
@@ -142,11 +105,12 @@ async def create_budget_spreadsheet(session: aiohttp.ClientSession, token: str,
         {"range": f"{name}!A1", "values": [cols]}
         for name, cols in HEADERS.items()
     ]
-    await _request(
-        session, "POST", f"{API}/{spreadsheet_id}/values:batchUpdate", ok=(200,),
+    async with session.post(
+        f"{API}/{spreadsheet_id}/values:batchUpdate",
         json={"valueInputOption": "RAW", "data": value_ranges},
         headers=_headers(token),
-    )
+    ) as resp:
+        await _check(resp, ok=(200,))
 
     # Bold header rows + freeze row 1, one request per tab
     requests = []
@@ -165,11 +129,12 @@ async def create_budget_spreadsheet(session: aiohttp.ClientSession, token: str,
                 "fields": "gridProperties.frozenRowCount",
             }
         })
-    await _request(
-        session, "POST", f"{API}/{spreadsheet_id}:batchUpdate", ok=(200,),
+    async with session.post(
+        f"{API}/{spreadsheet_id}:batchUpdate",
         json={"requests": requests},
         headers=_headers(token),
-    )
+    ) as resp:
+        await _check(resp, ok=(200,))
 
     return spreadsheet_id
 
@@ -186,18 +151,20 @@ async def create_plain_spreadsheet(session: aiohttp.ClientSession, token: str,
         "properties": {"title": title},
         "sheets": [{"properties": {"title": name}} for name in sheets],
     }
-    data = await _request(session, "POST", API, ok=(200,), read_json=True,
-                          json=body, headers=_headers(token))
+    async with session.post(API, json=body, headers=_headers(token)) as resp:
+        await _check(resp, ok=(200,))
+        data = await resp.json()
     spreadsheet_id = data["spreadsheetId"]
     sheet_ids = {s["properties"]["title"]: s["properties"]["sheetId"] for s in data["sheets"]}
 
     value_ranges = [{"range": f"{name}!A1", "values": rows} for name, rows in sheets.items() if rows]
     if value_ranges:
-        await _request(
-            session, "POST", f"{API}/{spreadsheet_id}/values:batchUpdate", ok=(200,),
+        async with session.post(
+            f"{API}/{spreadsheet_id}/values:batchUpdate",
             json={"valueInputOption": "RAW", "data": value_ranges},
             headers=_headers(token),
-        )
+        ) as resp:
+            await _check(resp, ok=(200,))
 
     requests = [
         {"repeatCell": {
@@ -208,10 +175,10 @@ async def create_plain_spreadsheet(session: aiohttp.ClientSession, token: str,
         for name, rows in sheets.items() if rows
     ]
     if requests:
-        await _request(
-            session, "POST", f"{API}/{spreadsheet_id}:batchUpdate", ok=(200,),
-            json={"requests": requests}, headers=_headers(token),
-        )
+        async with session.post(
+            f"{API}/{spreadsheet_id}:batchUpdate", json={"requests": requests}, headers=_headers(token),
+        ) as resp:
+            await _check(resp, ok=(200,))
 
     return spreadsheet_id
 
@@ -222,12 +189,13 @@ async def append_row(session: aiohttp.ClientSession, token: str,
     """Append a row, auto-generating and prepending its ID. Returns the ID."""
     row_id = new_row_id()
     row = [row_id] + values
-    await _request(
-        session, "POST", f"{API}/{spreadsheet_id}/values/{sheet_name}!A:A:append", ok=(200,),
+    async with session.post(
+        f"{API}/{spreadsheet_id}/values/{sheet_name}!A:A:append",
         params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
         json={"values": [row]},
         headers=_headers(token),
-    )
+    ) as resp:
+        await _check(resp, ok=(200,))
     return row_id
 
 
@@ -237,10 +205,12 @@ async def get_rows(session: aiohttp.ClientSession, token: str,
     """Return all data rows as dicts keyed by header name (ID included)."""
     headers = HEADERS[sheet_name]
     last_col = chr(ord("A") + len(headers) - 1)
-    data = await _request(
-        session, "GET", f"{API}/{spreadsheet_id}/values/{sheet_name}!A2:{last_col}",
-        ok=(200,), read_json=True, headers=_headers(token),
-    )
+    async with session.get(
+        f"{API}/{spreadsheet_id}/values/{sheet_name}!A2:{last_col}",
+        headers=_headers(token),
+    ) as resp:
+        await _check(resp, ok=(200,))
+        data = await resp.json()
 
     rows = []
     for raw in data.get("values", []):
@@ -269,10 +239,12 @@ async def update_cell(session: aiohttp.ClientSession, token: str,
     if column_name not in headers:
         raise ValueError(f"Unknown column {column_name!r} for sheet {sheet_name!r}")
 
-    id_column = await _request(
-        session, "GET", f"{API}/{spreadsheet_id}/values/{sheet_name}!A2:A",
-        ok=(200,), read_json=True, headers=_headers(token),
-    )
+    async with session.get(
+        f"{API}/{spreadsheet_id}/values/{sheet_name}!A2:A",
+        headers=_headers(token),
+    ) as resp:
+        await _check(resp, ok=(200,))
+        id_column = await resp.json()
 
     ids = [r[0] if r else "" for r in id_column.get("values", [])]
     if row_id not in ids:
@@ -280,12 +252,13 @@ async def update_cell(session: aiohttp.ClientSession, token: str,
     row_index = ids.index(row_id) + 2  # +2: header row + 1-based sheet rows
 
     col_letter = chr(ord("A") + headers.index(column_name))
-    await _request(
-        session, "PUT", f"{API}/{spreadsheet_id}/values/{sheet_name}!{col_letter}{row_index}",
-        ok=(200,), params={"valueInputOption": "USER_ENTERED"},
+    async with session.put(
+        f"{API}/{spreadsheet_id}/values/{sheet_name}!{col_letter}{row_index}",
+        params={"valueInputOption": "USER_ENTERED"},
         json={"values": [[new_value]]},
         headers=_headers(token),
-    )
+    ) as resp:
+        await _check(resp, ok=(200,))
     return True
 
 
@@ -294,11 +267,12 @@ async def publish_and_get_url(session: aiohttp.ClientSession, token: str,
                               spreadsheet_id: str) -> str:
     """Same 'anyone with the link, reader' pattern as PixKeep's drive_utils.py
     — useful e.g. for the one-off export file created when a car is removed."""
-    await _request(
-        session, "POST", f"{DRIVE_API}/files/{spreadsheet_id}/permissions",
-        ok=(200, 201), json={"type": "anyone", "role": "reader"},
+    async with session.post(
+        f"{DRIVE_API}/files/{spreadsheet_id}/permissions",
+        json={"type": "anyone", "role": "reader"},
         headers=_headers(token),
-    )
+    ) as resp:
+        await _check(resp, ok=(200, 201))
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
 
