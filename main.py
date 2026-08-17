@@ -7,6 +7,9 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand
 from aiohttp import web
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 from config import BOT_TOKEN, REDIS_URL, PORT, CRON_SECRET, SUPABASE_KEEPALIVE_INTERVAL_SECONDS
 from middlewares import PinMiddleware
@@ -109,7 +112,24 @@ async def run_polling_with_retry(dp: Dispatcher, bot: Bot):
 
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    storage = RedisStorage.from_url(REDIS_URL)
+    # Managed Redis (free-tier) drops idle connections after a while. Without
+    # health checks / retries, the first command after a lull raises
+    # ConnectionError and the whole update fails (the *next* update works
+    # fine because redis-py silently reconnects). health_check_interval
+    # makes the client ping+refresh idle connections proactively, and
+    # retry_on_error makes it transparently retry the one broken command
+    # instead of surfacing the error to the handler.
+    storage = RedisStorage.from_url(
+        REDIS_URL,
+        connection_kwargs={
+            "health_check_interval": 30,
+            "socket_keepalive": True,
+            "socket_connect_timeout": 5,
+            "retry_on_timeout": True,
+            "retry_on_error": [RedisConnectionError, RedisTimeoutError, ConnectionResetError],
+            "retry": Retry(ExponentialBackoff(base=0.1, cap=1), retries=3),
+        },
+    )
     dp = Dispatcher(storage=storage)
 
     dp.message.middleware(PinMiddleware())
@@ -136,3 +156,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
