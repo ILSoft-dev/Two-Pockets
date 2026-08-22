@@ -7,9 +7,15 @@ import hashlib
 import os
 import redis.asyncio as redis
 
-from config import REDIS_URL, PIN_SESSION_TTL_SECONDS, PIN_MAX_ATTEMPTS, PIN_LOCKOUT_SECONDS
+from config import (
+    REDIS_URL,
+    PIN_SESSION_TTL_SECONDS,
+    PIN_MAX_ATTEMPTS,
+    PIN_LOCKOUT_SECONDS,
+    redis_connection_kwargs,
+)
 
-_redis = redis.from_url(REDIS_URL, decode_responses=True)
+_redis = redis.from_url(REDIS_URL, decode_responses=True, **redis_connection_kwargs())
 
 _SALT = os.getenv("PIN_SALT", "financial-home-static-salt")  # можно вынести в .env
 

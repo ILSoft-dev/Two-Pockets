@@ -8,7 +8,7 @@ from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand
 from aiohttp import web
 
-from config import BOT_TOKEN, REDIS_URL, PORT, CRON_SECRET, SUPABASE_KEEPALIVE_INTERVAL_SECONDS
+from config import BOT_TOKEN, REDIS_URL, PORT, CRON_SECRET, SUPABASE_KEEPALIVE_INTERVAL_SECONDS, redis_connection_kwargs
 from middlewares import PinMiddleware
 from google_oauth_web import oauth_callback
 import supabase_client as db
@@ -109,7 +109,7 @@ async def run_polling_with_retry(dp: Dispatcher, bot: Bot):
 
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    storage = RedisStorage.from_url(REDIS_URL)
+    storage = RedisStorage.from_url(REDIS_URL, connection_kwargs=redis_connection_kwargs())
     dp = Dispatcher(storage=storage)
 
     dp.message.middleware(PinMiddleware())

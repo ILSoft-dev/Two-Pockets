@@ -68,3 +68,38 @@ CURRENCY_SYMBOLS = {
 PIN_SESSION_TTL_SECONDS = 300  # 5 минут
 PIN_MAX_ATTEMPTS = 3
 PIN_LOCKOUT_SECONDS = 300
+
+
+def redis_connection_kwargs() -> dict:
+    """
+    Устойчивая конфигурация соединения с Redis.
+
+    Бесплатные managed-провайдеры (Upstash и т.п.) молча закрывают
+    простаивающие TCP-соединения. Без этих настроек redis-py отдаёт из пула
+    уже "протухшее" соединение и падает с ConnectionError на первом же
+    сообщении после простоя — именно это происходило в проде
+    ("Error UNKNOWN while writing to socket. Connection lost").
+
+    - health_check_interval — перед использованием соединения, если оно
+      давно простаивало, посылается PING; если сокет мёртв, соединение
+      пересоздаётся ДО того, как в него полетит реальная команда.
+    - retry / retry_on_error — если обрыв всё же произошёл, redis-py сам
+      прозрачно повторит команду на новом соединении вместо того, чтобы
+      уронить обработку апдейта у aiogram.
+
+    Используется и для RedisStorage (main.py), и для отдельного клиента
+    в pin_handler.py — оба должны быть одинаково устойчивы.
+    """
+    from redis.asyncio.retry import Retry
+    from redis.backoff import ExponentialBackoff
+    from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
+
+    return {
+        "health_check_interval": 30,
+        "socket_keepalive": True,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 5,
+        "retry_on_timeout": True,
+        "retry_on_error": [RedisConnectionError, RedisTimeoutError],
+        "retry": Retry(ExponentialBackoff(base=0.5, cap=2.0), retries=3),
+    }
